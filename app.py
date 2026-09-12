@@ -6,6 +6,7 @@ import seaborn as sns
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 import warnings
@@ -307,27 +308,31 @@ def train_models(data):
         # -------------------------------------------------
         # IMPROVED RANDOM FOREST
         # -------------------------------------------------
+        if disease_name == "Hepatitis A":
 
-        model = RandomForestRegressor(
+             model = ExtraTreesRegressor(
+                n_estimators=300,
+                max_depth=None,
+                min_samples_split=2,
+                min_samples_leaf=1,
+                max_features=1.0,
+                random_state=42,
+                n_jobs=2
+            )
 
-            n_estimators=100,
+        else:
 
-            max_depth=None,
-
-            min_samples_split=2,
-
-            min_samples_leaf=1,
-
-            max_features="sqrt",
-
-            bootstrap=True,
-
-            random_state=42,
-
-            n_jobs=2
-
-        )
-
+            model = RandomForestRegressor(
+                n_estimators=100,
+                max_depth=None,
+                min_samples_split=2,
+                min_samples_leaf=1,
+                max_features="sqrt",
+                bootstrap=True,
+                random_state=42,
+                n_jobs=2
+           )
+       
         # -------------------------------------------------
         # TRAIN
         # -------------------------------------------------
@@ -1192,7 +1197,7 @@ elif page == "Feature Importance":
         f"Random Forest Feature Importance - {selected}"
     )
 
-    st.tight_layout()
+    plt.tight_layout()
 
     st.pyplot(fig)
 
