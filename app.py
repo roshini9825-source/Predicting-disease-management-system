@@ -311,7 +311,7 @@ def train_models(data):
         if disease_name == "Hepatitis A":
 
              model = ExtraTreesRegressor(
-                n_estimators=100,
+                n_estimators=50,
                 max_depth=None,
                 min_samples_split=2,
                 min_samples_leaf=1,
@@ -323,7 +323,7 @@ def train_models(data):
         else:
 
             model = RandomForestRegressor(
-                n_estimators=100,
+                n_estimators=50,
                 max_depth=None,
                 min_samples_split=2,
                 min_samples_leaf=1,
