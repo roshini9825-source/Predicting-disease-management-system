@@ -36,7 +36,7 @@ st.write(
 # =========================================================
 
 FILES = {
-    "Hepatitis A": "hepatitis.csv",
+    "Hepatitis ": "hepatitis.csv",
     "Measles": "measles.csv",
     "Mumps": "mumps.csv",
     "Pertussis": "pertussis.csv",
@@ -308,10 +308,10 @@ def train_models(data):
         # -------------------------------------------------
         # IMPROVED RANDOM FOREST
         # -------------------------------------------------
-        if disease_name == "Hepatitis A":
+        if disease_name == "Hepatitis ":
 
              model = ExtraTreesRegressor(
-                n_estimators=50,
+                n_estimators =150,
                 max_depth=None,
                 min_samples_split=2,
                 min_samples_leaf=1,
