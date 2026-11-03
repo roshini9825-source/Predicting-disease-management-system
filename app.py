@@ -1,4 +1,4 @@
-import streamlit as st
+=import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -24,8 +24,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🩺 Predicting Disease Management System")
-st.subheader("Multi-Disease Case Prediction")
+st.title("🩺 Measles Case Prediction System")
+st.subheader("Measles Case Prediction")
 st.write(
     "Machine Learning system for analysing disease case patterns "
     "and estimating expected cases."
@@ -33,16 +33,11 @@ st.write(
 
 
 # =========================================================
-# DISEASE FILES  (key "Hepatitis A" now matches the management page)
+# DISEASE FILES  (key "Measles" now matches the management page)
 # =========================================================
 
 FILES = {
-    "Hepatitis A": "hepatitis.csv",
     "Measles": "measles.csv",
-    "Mumps": "mumps.csv",
-    "Pertussis": "pertussis.csv",
-    "Rubella": "rubella.csv",
-    "Smallpox": "smallpox.csv",
 }
 
 # incidence_per_capita is derived from cases, so it is NOT used as a feature (target leakage).
@@ -224,12 +219,10 @@ page = st.sidebar.radio(
     ],
 )
 
-available = [x for x in FILES if x in disease_data_dict]
-if not available:
-    st.error("No disease dataset could be processed.")
+selected = "Measles"
+if selected not in disease_data_dict:
+    st.error("measles.csv was not found or could not be processed.")
     st.stop()
-
-selected = st.sidebar.selectbox("Select Disease", available)
 
 disease_df = disease_data_dict[selected].copy()
 selected_metrics = metrics[selected]
@@ -386,27 +379,6 @@ elif page == "Model Performance":
     st.caption("R² = mean of 5-fold cross-validation; folds: " + ", ".join(f"{v:.3f}" for v in selected_metrics["fold_r2"]))
 
     st.markdown("---")
-    st.subheader("All Disease Model Performance")
-
-    performance_df = pd.DataFrame([
-        {
-            "Disease": name,
-            "R² Score": m["r2"],
-            "MSE": m["mse"],
-            "RMSE": m["rmse"],
-            "MAE": m["mae"],
-        }
-        for name, m in metrics.items()
-    ])
-
-    st.dataframe(
-        performance_df.style.format({
-            "R² Score": "{:.4f}", "MSE": "{:.2f}",
-            "RMSE": "{:.2f}", "MAE": "{:.2f}",
-        }),
-        use_container_width=True,
-    )
-
     st.subheader("Actual vs Predicted Cases")
 
     y_test = selected_metrics["y_test"]
@@ -460,41 +432,11 @@ elif page == "Disease Management":
     )
 
     actions = {
-        "Hepatitis A": [
-            "Maintain hand hygiene",
-            "Use safe drinking water",
-            "Follow food hygiene practices",
-            "Seek medical advice when symptoms occur",
-        ],
         "Measles": [
             "Maintain vaccination awareness",
             "Avoid close contact during suspected infection",
             "Monitor outbreaks",
             "Seek medical advice when symptoms occur",
-        ],
-        "Mumps": [
-            "Maintain vaccination awareness",
-            "Practise good respiratory hygiene",
-            "Avoid close contact when ill",
-            "Seek medical advice when symptoms occur",
-        ],
-        "Pertussis": [
-            "Maintain vaccination awareness",
-            "Practise respiratory hygiene",
-            "Avoid close contact when ill",
-            "Seek medical advice when symptoms occur",
-        ],
-        "Rubella": [
-            "Maintain vaccination awareness",
-            "Follow public-health guidance",
-            "Avoid exposure during suspected infection",
-            "Seek medical advice when symptoms occur",
-        ],
-        "Smallpox": [
-            "Follow official public-health guidance",
-            "Report suspected cases to health authorities",
-            "Avoid close contact with suspected cases",
-            "Seek urgent professional medical advice",
         ],
     }
 
@@ -508,5 +450,5 @@ elif page == "Disease Management":
 
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    "Gradient Boosting Regression • 5-fold CV R² • Separate Models for Each Disease"
+    "Gradient Boosting Regression • 5-fold CV R² • Measles Model"
 )
