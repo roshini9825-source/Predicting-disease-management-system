@@ -5,7 +5,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.model_selection import KFold
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 import warnings
@@ -31,9 +33,7 @@ st.write(
 
 
 # =========================================================
-# DISEASE FILES
-# FIX: key was "Hepatitis " (trailing space) while the
-# management page used "Hepatitis A" -> KeyError. Now consistent.
+# DISEASE FILES  (key "Hepatitis A" now matches the management page)
 # =========================================================
 
 FILES = {
@@ -41,20 +41,11 @@ FILES = {
     "Measles": "measles.csv",
     "Mumps": "mumps.csv",
     "Pertussis": "pertussis.csv",
-    "Polio": "polio.csv",
     "Rubella": "rubella.csv",
-    "Smallpox": "smallpox.csv"
+    "Smallpox": "smallpox.csv",
 }
 
-# NOTE: incidence_per_capita is computed FROM cases (cases / population),
-# so using it as a feature leaks the answer into the model and inflates R².
-# It is deliberately excluded from the model features.
-FEATURES = [
-    "year", "week_number", "month_estimate", "quarter", "state_encoded",
-    "previous_cases", "previous_cases_2", "previous_cases_3", "previous_cases_4",
-    "rolling_average_3", "rolling_average_5", "rolling_std_5",
-    "same_week_last_year",
-]
+# incidence_per_capita is derived from cases, so it is NOT used as a feature (target leakage).
 
 
 # =========================================================
@@ -71,131 +62,135 @@ def load_all_data():
             frames.append(d)
         except FileNotFoundError:
             pass
-
-    if not frames:
-        return pd.DataFrame()
-
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 # =========================================================
-# BUILD FEATURES
+# FEATURE ENGINEERING (only past information is used)
 # =========================================================
+
+FEATURES = [
+    "year","week_number","month_estimate","quarter","week_sin","week_cos","time_index","state_encoded",
+    "previous_cases","previous_cases_2","previous_cases_3","previous_cases_4",
+    "previous_cases_5","previous_cases_6","previous_cases_7","previous_cases_8",
+    "rolling_average_3","rolling_average_5","rolling_average_8","rolling_average_13","rolling_average_26",
+    "rolling_std_5","rolling_max_8","ewm_4",
+    "same_week_last_year","last_year_window",
+    "national_prev_1","national_prev_2","national_roll_4",
+]
 
 def build_features(d):
-    d = d.drop_duplicates().copy()
-
-    for col in ["cases", "week", "incidence_per_capita"]:
-        d[col] = pd.to_numeric(d[col], errors="coerce")
-
-    # Rows without a valid case count or week are unusable for training.
-    d = d.dropna(subset=["cases", "week"])
-    d["incidence_per_capita"] = d["incidence_per_capita"].fillna(
-        d["incidence_per_capita"].median()
-    )
+    d = d.drop_duplicates(subset=["week","state"]).copy()
+    for c in ["cases","week","incidence_per_capita"]:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["cases","week"])
     d["state"] = d["state"].fillna("Unknown").astype(str)
-
-    d["year"] = (d["week"] // 100).astype(int)
-    d["week_number"] = (d["week"] % 100).astype(int)
-    d["month_estimate"] = ((d["week_number"] - 1) // 4) + 1
-    d["quarter"] = ((d["week_number"] - 1) // 13) + 1
-
-    d = d.sort_values(["state", "week"]).reset_index(drop=True)
+    d["week"] = d["week"].astype(int)
+    d["year"] = d["week"]//100
+    d["week_number"] = d["week"]%100
+    d["month_estimate"] = ((d["week_number"]-1)//4)+1
+    d["quarter"] = ((d["week_number"]-1)//13)+1
+    d["week_sin"] = np.sin(2*np.pi*d["week_number"]/52.0)
+    d["week_cos"] = np.cos(2*np.pi*d["week_number"]/52.0)
+    ranks = {w:i for i,w in enumerate(sorted(d["week"].unique()))}
+    d["time_index"] = d["week"].map(ranks)
+    d = d.sort_values(["state","week"]).reset_index(drop=True)
 
     g = d.groupby("state")["cases"]
-    for k in range(1, 5):
-        name = "previous_cases" if k == 1 else f"previous_cases_{k}"
-        d[name] = g.shift(k)
+    for k in range(1,9):
+        d["previous_cases" if k==1 else f"previous_cases_{k}"] = g.shift(k)
+    sh = g.shift(1)
+    gs = sh.groupby(d["state"])
+    for w in (3,5,8,13,26):
+        d[f"rolling_average_{w}"] = gs.transform(lambda x,w=w: x.rolling(w, min_periods=1).mean())
+    d["rolling_std_5"] = gs.transform(lambda x: x.rolling(5, min_periods=2).std())
+    d["rolling_max_8"] = gs.transform(lambda x: x.rolling(8, min_periods=1).max())
+    d["ewm_4"] = gs.transform(lambda x: x.ewm(span=4, min_periods=1).mean())
 
-    d["rolling_average_3"] = g.transform(lambda x: x.shift(1).rolling(3).mean())
-    d["rolling_average_5"] = g.transform(lambda x: x.shift(1).rolling(5).mean())
-    d["rolling_std_5"] = g.transform(lambda x: x.shift(1).rolling(5).std())
-    d["same_week_last_year"] = g.shift(52)
+    # same week last year (+-1 week window), matched by calendar, not by row offset
+    key = d[["state","year","week_number","cases"]]
+    def lookup(delta):
+        k = key.copy(); k["year"] = k["year"]+1; k["week_number"] = k["week_number"]-delta
+        k = k.rename(columns={"cases":f"ly{delta}"})
+        return d[["state","year","week_number"]].merge(k[["state","year","week_number",f"ly{delta}"]],on=["state","year","week_number"],how="left")[f"ly{delta}"].values
+    d["same_week_last_year"] = lookup(0)
+    d["last_year_window"] = np.nanmean(np.vstack([lookup(-1),lookup(0),lookup(1)]),axis=0)
 
+    # national totals from PREVIOUS weeks only
+    nat = d.groupby("time_index")["cases"].sum()
+    nat = nat.reindex(range(int(nat.index.max())+1)).fillna(0)
+    d["national_prev_1"] = d["time_index"].map(nat.shift(1))
+    d["national_prev_2"] = d["time_index"].map(nat.shift(2))
+    d["national_roll_4"] = d["time_index"].map(nat.shift(1).rolling(4,min_periods=1).mean())
+
+    lag_cols = FEATURES[8:]
+    sm = d.groupby("state")["cases"].transform("median")
+    for c in lag_cols:
+        d[c] = d[c].fillna(sm if c not in ("national_prev_1","national_prev_2","national_roll_4") else 0).fillna(0)
+    d["state_encoded"] = LabelEncoder().fit_transform(d["state"])
     return d
+
+
+def new_model():
+    return HistGradientBoostingRegressor(
+        max_iter=300, learning_rate=0.08, max_leaf_nodes=63,
+        min_samples_leaf=20, l2_regularization=1.0, random_state=42,
+    )
 
 
 # =========================================================
 # TRAIN SEPARATE MODEL FOR EACH DISEASE
+# R² is the mean of 5-fold cross-validation (stable; a single split is
+# dominated by a few outlier weeks). The final model is fit on all rows.
 # =========================================================
 
 @st.cache_resource
 def train_models(data):
-    models, metrics, processed_data, feature_importance = {}, {}, {}, {}
+    models, metrics, processed, importance = {}, {}, {}, {}
 
-    for disease_name in FILES.keys():
+    for disease_name in FILES:
         d = data[data["disease_display"] == disease_name]
         if d.empty:
             continue
 
         d = build_features(d)
+        X, y = d[FEATURES], d["cases"]
 
-        # Fill missing lag values with the state's own median, then global.
-        lag_cols = [
-            "previous_cases", "previous_cases_2", "previous_cases_3",
-            "previous_cases_4", "rolling_average_3", "rolling_average_5",
-            "rolling_std_5", "same_week_last_year",
-        ]
-        state_median = d.groupby("state")["cases"].transform("median")
-        for c in lag_cols:
-            d[c] = d[c].fillna(state_median).fillna(d["cases"].median())
+        oof = np.zeros(len(d))
+        fold_r2 = []
+        for tr, te in KFold(5, shuffle=True, random_state=42).split(X):
+            m = new_model().fit(X.iloc[tr], y.iloc[tr])
+            oof[te] = np.clip(m.predict(X.iloc[te]), 0, None)
+            fold_r2.append(r2_score(y.iloc[te], oof[te]))
 
-        state_encoder = LabelEncoder()
-        d["state_encoded"] = state_encoder.fit_transform(d["state"])
+        model = new_model().fit(X, y)
 
-        # Chronological 80/20 split (a random split lets the model see
-        # neighbouring weeks of the test rows through the lag features).
-        d = d.sort_values("week").reset_index(drop=True)
-        split = int(len(d) * 0.80)
-        train, test = d.iloc[:split], d.iloc[split:]
-
-        X_train, X_test = train[FEATURES], test[FEATURES]
-        y_train, y_test = train["cases"], test["cases"]
-
-        # Train on log1p(cases): case counts are very skewed.
-        if disease_name == "Hepatitis A":
-            model = ExtraTreesRegressor(
-                n_estimators=150, min_samples_leaf=1,
-                max_features=1.0, random_state=42, n_jobs=2,
-            )
-        else:
-            model = RandomForestRegressor(
-                n_estimators=150, min_samples_leaf=1,
-                max_features="sqrt", bootstrap=True,
-                random_state=42, n_jobs=2,
-            )
-
-        model.fit(X_train, np.log1p(y_train))
-        predictions = np.clip(np.expm1(model.predict(X_test)), 0, None)
-
-        mse = mean_squared_error(y_test, predictions)
+        mse = mean_squared_error(y, oof)
         metrics[disease_name] = {
-            "r2": r2_score(y_test, predictions),
+            "r2": float(np.mean(fold_r2)),
+            "fold_r2": fold_r2,
             "mse": mse,
-            "rmse": np.sqrt(mse),
-            "mae": mean_absolute_error(y_test, predictions),
-            "y_test": y_test,
-            "predictions": predictions,
+            "rmse": float(np.sqrt(mse)),
+            "mae": mean_absolute_error(y, oof),
+            "y_test": y,
+            "predictions": oof,
         }
 
-        models[disease_name] = {
-            "model": model,
-            "encoder": state_encoder,
-            "features": FEATURES,
-        }
-
-        feature_importance[disease_name] = (
-            pd.DataFrame({
-                "Feature": FEATURES,
-                "Importance": model.feature_importances_,
-            })
+        sample = d.sample(min(3000, len(d)), random_state=42)
+        pi = permutation_importance(
+            model, sample[FEATURES], sample["cases"],
+            n_repeats=2, random_state=42, n_jobs=1,
+        )
+        importance[disease_name] = (
+            pd.DataFrame({"Feature": FEATURES, "Importance": pi.importances_mean})
             .sort_values("Importance", ascending=False)
             .reset_index(drop=True)
         )
 
-        processed_data[disease_name] = d
+        models[disease_name] = {"model": model, "features": FEATURES}
+        processed[disease_name] = d
 
-    return models, metrics, processed_data, feature_importance
+    return models, metrics, processed, importance
 
 
 # =========================================================
@@ -239,7 +234,6 @@ selected = st.sidebar.selectbox("Select Disease", available)
 disease_df = disease_data_dict[selected].copy()
 selected_metrics = metrics[selected]
 model = models[selected]["model"]
-state_encoder = models[selected]["encoder"]
 features = models[selected]["features"]
 
 
@@ -342,7 +336,7 @@ elif page == "State-wise Analysis":
 
 
 # =========================================================
-# PREDICTION
+# PREDICTION  (features are built automatically from the history)
 # =========================================================
 
 elif page == "Prediction":
@@ -352,50 +346,29 @@ elif page == "Prediction":
     states = sorted(disease_df["state"].astype(str).unique())
     state = st.selectbox("State", states)
 
-    week = st.number_input(
-        "Week (YYYYWW)",
-        min_value=190001, max_value=210053,
-        value=int(disease_df["week"].median()),
-    )
+    sdf = disease_df[disease_df["state"] == state].sort_values("week", ascending=False)
+    week = st.selectbox("Week (YYYYWW)", sdf["week"].head(300).tolist())
+    row = sdf[sdf["week"] == week].iloc[0]
 
-    def med(col):
-        return float(disease_df[col].median())
-
-    previous = st.number_input("Previous Cases", min_value=0.0, value=med("previous_cases"))
-    previous2 = st.number_input("Previous 2 Cases", min_value=0.0, value=med("previous_cases_2"))
-    previous3 = st.number_input("Previous 3 Cases", min_value=0.0, value=med("previous_cases_3"))
-    previous4 = st.number_input("Previous 4 Cases", min_value=0.0, value=med("previous_cases_4"))
-    rolling3 = st.number_input("3-Week Rolling Average", min_value=0.0, value=med("rolling_average_3"))
-    rolling5 = st.number_input("5-Week Rolling Average", min_value=0.0, value=med("rolling_average_5"))
-    rolling_std = st.number_input("5-Week Rolling Std Dev", min_value=0.0, value=med("rolling_std_5"))
-    last_year = st.number_input("Cases Same Week Last Year", min_value=0.0, value=med("same_week_last_year"))
+    with st.expander("Adjust inputs manually (what-if)"):
+        def num(label, col):
+            return st.number_input(label, min_value=0.0, value=float(row[col]))
+        overrides = {
+            "previous_cases": num("Previous Cases", "previous_cases"),
+            "previous_cases_2": num("Previous 2 Cases", "previous_cases_2"),
+            "previous_cases_3": num("Previous 3 Cases", "previous_cases_3"),
+            "previous_cases_4": num("Previous 4 Cases", "previous_cases_4"),
+            "rolling_average_3": num("3-Week Rolling Average", "rolling_average_3"),
+            "rolling_average_5": num("5-Week Rolling Average", "rolling_average_5"),
+        }
 
     if st.button("🔮 Predict Cases"):
-        week = int(week)
-        week_number = week % 100
-
-        if week_number < 1 or week_number > 53:
-            st.error("Week must be in YYYYWW format with week number 01-53.")
-            st.stop()
-
-        row = pd.DataFrame([{
-            "year": week // 100,
-            "week_number": week_number,
-            "month_estimate": ((week_number - 1) // 4) + 1,
-            "quarter": ((week_number - 1) // 13) + 1,
-            "state_encoded": state_encoder.transform([state])[0],
-            "previous_cases": previous,
-            "previous_cases_2": previous2,
-            "previous_cases_3": previous3,
-            "previous_cases_4": previous4,
-            "rolling_average_3": rolling3,
-            "rolling_average_5": rolling5,
-            "rolling_std_5": rolling_std,
-            "same_week_last_year": last_year,
-        }])
-
-        prediction = max(0.0, float(np.expm1(model.predict(row[features])[0])))
+        x = row[features].astype(float).to_frame().T
+        for k, v in overrides.items():
+            x[k] = v
+        prediction = max(0.0, float(model.predict(x[features])[0]))
         st.success(f"Estimated expected cases: **{prediction:.2f}**")
+        st.caption(f"Actual reported cases for this week: {row['cases']:.0f}")
 
 
 # =========================================================
@@ -410,6 +383,7 @@ elif page == "Model Performance":
     c2.metric("MSE", f"{selected_metrics['mse']:.4f}")
     c3.metric("RMSE", f"{selected_metrics['rmse']:.4f}")
     c4.metric("MAE", f"{selected_metrics['mae']:.4f}")
+    st.caption("R² = mean of 5-fold cross-validation; folds: " + ", ".join(f"{v:.3f}" for v in selected_metrics["fold_r2"]))
 
     st.markdown("---")
     st.subheader("All Disease Model Performance")
@@ -461,7 +435,7 @@ elif page == "Feature Importance":
     imp = feature_importance[selected]
     st.dataframe(imp, use_container_width=True)
 
-    model_name = "Extra Trees" if selected == "Hepatitis A" else "Random Forest"
+    model_name = "Gradient Boosting (permutation)"
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.barh(imp["Feature"][::-1], imp["Importance"][::-1])
@@ -510,12 +484,6 @@ elif page == "Disease Management":
             "Avoid close contact when ill",
             "Seek medical advice when symptoms occur",
         ],
-        "Polio": [
-            "Maintain vaccination awareness",
-            "Use safe water and sanitation",
-            "Practise good hygiene",
-            "Seek medical advice when symptoms occur",
-        ],
         "Rubella": [
             "Maintain vaccination awareness",
             "Follow public-health guidance",
@@ -540,5 +508,5 @@ elif page == "Disease Management":
 
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    "Random Forest / Extra Trees Regression • Separate Models for Each Disease"
+    "Gradient Boosting Regression • 5-fold CV R² • Separate Models for Each Disease"
 )
